@@ -1,0 +1,204 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>GPass | Group Participation and Assessment System</title>
+<style>
+:root{--navy:#0b2a6f;--blue:#1d4ed8;--red:#e11d2e;--green:#16a34a;--bg:#f1f5f9;--ink:#0f172a;--mut:#64748b;--line:#e2e8f0}
+*{box-sizing:border-box}
+body{margin:0;font:15px/1.45 system-ui,"Segoe UI",Arial,sans-serif;background:var(--bg);color:var(--ink)}
+header{background:var(--navy);color:#fff;padding:12px 20px;display:flex;align-items:center;gap:12px;flex-wrap:wrap}
+.logo{background:var(--red);border-radius:8px;padding:6px 9px;font-weight:800}
+header b{font-size:18px}header small{opacity:.8}.sp{flex:1}
+main{max-width:1100px;margin:0 auto;padding:18px}
+.card{background:#fff;border:1px solid var(--line);border-radius:12px;padding:18px;margin-bottom:18px;box-shadow:0 1px 3px #0001}
+h2{margin:0 0 4px;font-size:18px;color:var(--navy)}.mut{color:var(--mut);margin:0 0 12px}
+.stats{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:12px;margin-bottom:18px}
+.stat{background:#fff;border-radius:12px;padding:14px;border-left:5px solid var(--blue)}
+.stat b{display:block;font-size:26px}.stat:nth-child(2){border-color:var(--red)}.stat:nth-child(3){border-color:var(--green)}
+input,select{padding:8px 10px;border:1px solid #cbd5e1;border-radius:8px;font:inherit;max-width:100%}
+input.n{width:80px}input.t{width:200px}
+button{padding:8px 14px;border:0;border-radius:8px;background:var(--blue);color:#fff;font:inherit;font-weight:600;cursor:pointer}
+button.g{background:var(--green)}button.r{background:var(--red)}button.o{background:#fff;color:var(--blue);border:1px solid var(--blue)}
+.row{display:flex;gap:8px;flex-wrap:wrap;align-items:center;margin:8px 0}
+.wrap{overflow-x:auto}table{width:100%;border-collapse:collapse;min-width:640px}
+th,td{text-align:left;padding:8px 10px;border-bottom:1px solid var(--line)}th{background:#f8fafc;color:var(--navy);font-size:13px}
+.badge{padding:2px 9px;border-radius:99px;font-size:12px;font-weight:700;background:#e0e7ff;color:var(--navy)}
+.good{background:#dcfce7;color:#166534}.ok{background:#fef3c7;color:#92400e}.low{background:#fee2e2;color:#991b1b}
+#auth{max-width:380px;margin:40px auto}#auth input{width:100%;margin:6px 0}
+#msg{position:fixed;bottom:16px;left:50%;transform:translateX(-50%);padding:10px 16px;border-radius:10px;color:#fff;background:var(--navy);display:none;max-width:90%;z-index:9}
+</style>
+</head>
+<body>
+<header><span class="logo">GP</span><div><b>GPass</b><br><small>Group Participation and Assessment System</small></div><span class="sp"></span><span id="who"></span><button id="out" class="o" data-act="signout" style="display:none">Sign out</button></header>
+<main id="app"><p class="mut">Loading...</p></main>
+<div id="msg"></div>
+<script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2.45.4/dist/umd/supabase.min.js"></script>
+<script>
+const SB_URL = "https://mgncbrixaexxfnbdzqdr.supabase.co";
+const SB_KEY = "sb_publishable_Gy-Fxi06X0tlLMf6fh37LA_R8fpDdXF";
+const LEADER_MAX = 30, LECTURER_MAX = 70;
+const sb = supabase.createClient(SB_URL, SB_KEY);
+const $ = id => document.getElementById(id);
+const esc = s => String(s == null ? "" : s).replace(/[&<>"']/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
+let S = {user:null, role:"leader", name:"", groups:[], members:[], grades:{}};
+let msgTimer;
+
+function toast(t, bad) {
+  const m = $("msg"); m.textContent = t; m.style.background = bad ? "#b91c1c" : "#0b2a6f"; m.style.display = "block";
+  clearTimeout(msgTimer); msgTimer = setTimeout(() => m.style.display = "none", 5000);
+}
+const val = id => ($(id) ? $(id).value.trim() : "");
+// "" -> null (no mark). A number inside 0..max -> the number. Anything else -> undefined (invalid).
+function mark(v, max) {
+  if (v === "") return null;
+  const n = Number(v);
+  return (isFinite(n) && n >= 0 && n <= max) ? n : undefined;
+}
+const fmt = v => v == null ? "-" : Number(v).toFixed(1);
+const lecMark = m => S.grades[m.id];
+function total(m) { const l = m.leader_mark, u = lecMark(m); return (l != null && u != null) ? Number(l) + Number(u) : null; }
+function status(m) {
+  const t = total(m);
+  if (t == null) return m.leader_mark != null ? ["Awaiting lecturer", ""] : ["Not marked yet", ""];
+  return t >= 70 ? ["Performing well", "good"] : t >= 50 ? ["Doing okay", "ok"] : ["Needs support", "low"];
+}
+const gname = id => (S.groups.find(g => g.id === id) || {}).name || "";
+const myGroup = () => S.groups.find(g => g.owner_id === S.user.id);
+
+async function load() {
+  const [p, g, m, r] = await Promise.all([
+    sb.from("profiles").select("role,full_name").eq("id", S.user.id).maybeSingle(),
+    sb.from("groups").select("*").order("name"),
+    sb.from("members").select("*").order("name"),
+    sb.from("grades").select("*")
+  ]);
+  const err = p.error || g.error || m.error || r.error;
+  if (err) { toast("Could not load data: " + err.message, true); return; }
+  S.role = p.data ? p.data.role : "leader";
+  S.name = (p.data && p.data.full_name) || S.user.email;
+  S.groups = g.data; S.members = m.data;
+  S.grades = {}; r.data.forEach(x => S.grades[x.member_id] = x.lecturer_mark);
+}
+async function boot() {
+  const { data } = await sb.auth.getSession();
+  S.user = data.session ? data.session.user : null;
+  if (S.user) await load();
+  render();
+}
+
+function authView() {
+  return `<div id="auth" class="card"><h2>Welcome to GPass</h2><p class="mut">Sign in, or create an account if you are new.</p>
+  <input id="fn" placeholder="Full name (new accounts only)">
+  <input id="em" type="email" placeholder="Email">
+  <input id="pw" type="password" placeholder="Password (6+ characters)">
+  <div class="row"><button data-act="signin">Sign in</button><button class="o" data-act="signup">Create account</button></div></div>`;
+}
+
+function overviewView() {
+  const rows = S.members.map(m => ({m, t: total(m)})).sort((a, b) => (b.t ?? -1) - (a.t ?? -1));
+  const done = rows.filter(r => r.t != null);
+  const avg = done.length ? (done.reduce((s, r) => s + r.t, 0) / done.length).toFixed(1) : "-";
+  const body = rows.map(({m}) => { const s = status(m); return `<tr><td>${esc(m.name)}</td><td>${esc(gname(m.group_id))}</td><td>${esc(m.role)}</td><td>${fmt(m.leader_mark)}</td><td>${fmt(lecMark(m))}</td><td><b>${fmt(total(m))}</b></td><td><span class="badge ${s[1]}">${s[0]}</span></td></tr>`; }).join("");
+  return `<div class="stats"><div class="stat"><b>${S.groups.length}</b>Groups</div><div class="stat"><b>${S.members.length}</b>Students</div><div class="stat"><b>${avg}</b>Average total (out of 100)</div></div>
+  <div class="card"><h2>All students</h2><p class="mut">Everyone can see every group. You can only edit your own.</p><div class="wrap"><table><tr><th>Student</th><th>Group</th><th>Role</th><th>Leader (30)</th><th>Lecturer (70)</th><th>Total (100)</th><th>Status</th></tr>${body || '<tr><td colspan="7">No students yet.</td></tr>'}</table></div></div>`;
+}
+
+function leaderView() {
+  const g = myGroup();
+  if (!g) return `<div class="card"><h2>Create your group</h2><p class="mut">You have not created a group yet.</p><div class="row"><input id="gn" placeholder="Group name, e.g. PROJECT 11"><input id="gp" class="t" placeholder="Project title"><button class="g" data-act="creategroup">Create group</button></div></div>`;
+  const mine = S.members.filter(m => m.group_id === g.id);
+  const body = mine.map(m => `<tr><td>${esc(m.name)}<br><small class="mut">${esc(m.number)}</small></td><td>${esc(m.role)}</td><td><input class="t" id="tk-${m.id}" value="${esc(m.tasks)}"></td><td><input class="n" id="lm-${m.id}" value="${m.leader_mark == null ? "" : m.leader_mark}"></td><td>${fmt(lecMark(m))}</td><td><button class="g" data-act="savemember" data-id="${m.id}">Save</button> <button class="r" data-act="delmember" data-id="${m.id}">Remove</button></td></tr>`).join("");
+  return `<div class="card"><h2>My group: ${esc(g.name)}</h2><p class="mut">${esc(g.project)} &mdash; you give each member a mark out of 30. The lecturer awards the other 70.</p>
+  <div class="row"><input id="mn" class="n" style="width:130px" placeholder="Student no."><input id="mname" placeholder="Student name"><select id="mr"><option>Member</option><option>Leader</option><option>Deputy leader</option></select><input id="mt" class="t" placeholder="What did they do?"><input id="mm" class="n" placeholder="0-30"><button class="g" data-act="addmember">Add student</button></div>
+  <div class="wrap"><table><tr><th>Student</th><th>Role</th><th>Tasks</th><th>Your mark (30)</th><th>Lecturer (70)</th><th></th></tr>${body || '<tr><td colspan="6">No students added yet.</td></tr>'}</table></div></div>`;
+}
+
+function lecturerView() {
+  const rows = S.members.slice().sort((a, b) => gname(a.group_id).localeCompare(gname(b.group_id)) || a.name.localeCompare(b.name));
+  const body = rows.map(m => `<tr><td>${esc(gname(m.group_id))}</td><td>${esc(m.name)}<br><small class="mut">${esc(m.number)}</small></td><td>${esc(m.tasks)}</td><td>${fmt(m.leader_mark)}</td><td><input class="n" id="um-${m.id}" value="${lecMark(m) == null ? "" : lecMark(m)}"></td><td><b>${fmt(total(m))}</b></td><td><button class="g" data-act="savegrade" data-id="${m.id}">Save</button></td></tr>`).join("");
+  return `<div class="card"><h2>Lecturer grading</h2><p class="mut">Give each student a mark out of 70. Total = leader mark (30) + lecturer mark (70).</p><div class="row"><button class="o" data-act="csv">Export to Excel (CSV)</button></div>
+  <div class="wrap"><table><tr><th>Group</th><th>Student</th><th>Tasks</th><th>Leader (30)</th><th>Lecturer (70)</th><th>Total</th><th></th></tr>${body || '<tr><td colspan="7">No students yet.</td></tr>'}</table></div></div>`;
+}
+
+function render() {
+  $("who").textContent = S.user ? `${S.name} (${S.role === "lecturer" ? "Lecturer" : "Group leader"})` : "";
+  $("out").style.display = S.user ? "" : "none";
+  $("app").innerHTML = !S.user ? authView() : overviewView() + (S.role === "lecturer" ? lecturerView() : leaderView());
+}
+
+async function run(fn) {
+  try { await fn(); } catch (e) { toast("Something went wrong: " + (e.message || e), true); }
+}
+async function refresh() { await load(); render(); }
+function check(res, okText) {
+  if (res.error) { toast(res.error.message, true); return false; }
+  if (okText) toast(okText); return true;
+}
+
+document.addEventListener("click", e => {
+  const b = e.target.closest("[data-act]"); if (!b) return;
+  const id = b.dataset.id;
+  run(async () => {
+    switch (b.dataset.act) {
+      case "signin": {
+        const r = await sb.auth.signInWithPassword({email: val("em"), password: $("pw").value});
+        if (r.error) return toast(r.error.message, true);
+        return boot();
+      }
+      case "signup": {
+        if (!val("fn")) return toast("Please type your full name first.", true);
+        const r = await sb.auth.signUp({email: val("em"), password: $("pw").value, options: {data: {full_name: val("fn")}}});
+        if (r.error) return toast(r.error.message, true);
+        if (!r.data.session) return toast("Account created. Check your email to confirm it, then sign in.");
+        return boot();
+      }
+      case "signout": await sb.auth.signOut(); S = {user:null, role:"leader", name:"", groups:[], members:[], grades:{}}; return render();
+      case "creategroup": {
+        if (!val("gn")) return toast("Type a group name.", true);
+        if (check(await sb.from("groups").insert({name: val("gn"), project: val("gp")}), "Group created.")) await refresh();
+        return;
+      }
+      case "addmember": {
+        const g = myGroup(), lm = mark(val("mm"), LEADER_MAX);
+        if (!val("mn") || !val("mname")) return toast("Type the student number and name.", true);
+        if (lm === undefined) return toast("The mark must be between 0 and 30.", true);
+        const res = await sb.from("members").insert({group_id: g.id, number: val("mn"), name: val("mname"), role: $("mr").value, tasks: val("mt"), leader_mark: lm});
+        if (check(res, "Student added.")) await refresh();
+        return;
+      }
+      case "savemember": {
+        const lm = mark(val("lm-" + id), LEADER_MAX);
+        if (lm === undefined) return toast("The mark must be between 0 and 30.", true);
+        if (check(await sb.from("members").update({tasks: val("tk-" + id), leader_mark: lm}).eq("id", id), "Saved.")) await refresh();
+        return;
+      }
+      case "delmember": {
+        if (!confirm("Remove this student?")) return;
+        if (check(await sb.from("members").delete().eq("id", id), "Removed.")) await refresh();
+        return;
+      }
+      case "savegrade": {
+        const um = mark(val("um-" + id), LECTURER_MAX);
+        if (um === undefined) return toast("The mark must be between 0 and 70.", true);
+        const res = um === null ? await sb.from("grades").delete().eq("member_id", id)
+          : await sb.from("grades").upsert({member_id: id, lecturer_mark: um, updated_at: new Date().toISOString()});
+        if (check(res, "Saved.")) await refresh();
+        return;
+      }
+      case "csv": {
+        const q = v => '"' + String(v == null ? "" : v).replace(/"/g, '""') + '"';
+        const lines = ["Group,Student number,Student name,Role,Leader mark (30),Lecturer mark (70),Total (100)"].concat(
+          S.members.map(m => [gname(m.group_id), m.number, m.name, m.role, m.leader_mark, lecMark(m), total(m)].map(q).join(",")));
+        const a = document.createElement("a");
+        a.href = URL.createObjectURL(new Blob(["\ufeff" + lines.join("\r\n")], {type: "text/csv"}));
+        a.download = "gpass-results.csv"; a.click(); return;
+      }
+    }
+  });
+});
+boot();
+</script>
+</body>
+</html>
